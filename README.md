@@ -25,6 +25,7 @@ chmod +x deploy-cluster.sh
 # Deploy cluster (SSH keys are auto-generated)
 ./deploy-cluster.sh
 ```
+#####Note - ssh key management is automated. script will generate (if not exists) and handle keys.
 
 ### 2. Verify Deployment
 ```bash
@@ -65,6 +66,8 @@ chmod +x manage-k8-deployment.sh
 ./manage-k8-deployment.sh status $MASTER_IP
 ```
 
+
+ 
 ### 3. Application Components
 The deployment includes:
 - **MySQL Database**:
