@@ -152,28 +152,3 @@ curl http://<external-ip>:80
 ```bash
 aws cloudformation delete-stack --stack-name test19919191
 ```
-
-## Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Master Node   │    │  Worker Node 1  │    │  Worker Node 2  │
-│                 │    │                 │    │                 │
-│ • API Server    │    │ • Kubelet       │    │ • Kubelet       │
-│ • etcd          │    │ • Container     │    │ • Container     │
-│ • Scheduler     │    │   Runtime       │    │   Runtime       │
-│ • Controller    │    │ • Kube-proxy    │    │ • Kube-proxy    │
-│ • KEDA          │    │                 │    │                 │
-│ • Metrics       │    │                 │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │   Applications  │
-                    │                 │
-                    │ • MySQL (1-3)   │
-                    │ • Nginx (1-10)  │
-                    │ • Auto-scaling  │
-                    └─────────────────┘
-```
