@@ -1,0 +1,454 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: 'Kubernetes cluster with 1 master and 2 worker nodes'
+
+Parameters:
+  # Network Configuration
+  VpcCidr:
+    Type: String
+    Default: '10.0.0.0/16'
+    Description: 'CIDR block for VPC'
+  
+  PublicSubnetCidr:
+    Type: String
+    Default: '10.0.1.0/24'
+    Description: 'CIDR block for public subnet'
+  
+  # EC2 Configuration
+  InstanceType:
+    Type: String
+    Default: 't3.medium'
+    AllowedValues: [t3.small, t3.medium, t3.large, t3.xlarge]
+    Description: 'EC2 instance type for all nodes'
+  
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: 'EC2 Key Pair for SSH access'
+    Default: 'k8s-ssh-keypair'
+  AMIId:
+    Type: String
+    Default: 'ami-0c7217cdde317cfec'
+    Description: 'Ubuntu 22.04 LTS AMI ID'
+  
+  # Kubernetes Configuration
+  KubernetesVersion:
+    Type: String
+    Default: '1.28'
+    Description: 'Kubernetes version'
+  
+  PodNetworkCidr:
+    Type: String
+    Default: '192.168.0.0/16'
+    Description: 'CIDR block for pod network'
+  
+
+  
+  WorkerNodeCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: 'Number of worker nodes to create'
+  
+  # SSH Keys for inter-node communication
+  ClusterPublicKey:
+    Type: String
+    Description: 'Public SSH key for cluster inter-node communication'
+
+  ClusterPrivateKey:
+    Type: String
+    Description: 'Private SSH key for master node (base64 encoded)'
+    NoEcho: true
+
+Resources:
+  # VPC and Networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: k8s-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: k8s-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: k8s-public-subnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: k8s-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  K8sSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for Kubernetes cluster'
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: '0.0.0.0/0'
+          Description: 'SSH access'
+        - IpProtocol: tcp
+          FromPort: 6443
+          ToPort: 6443
+          CidrIp: !Ref VpcCidr
+          Description: 'Kubernetes API server'
+        - IpProtocol: tcp
+          FromPort: 2379
+          ToPort: 2380
+          CidrIp: !Ref VpcCidr
+          Description: 'etcd server client API'
+        - IpProtocol: tcp
+          FromPort: 10250
+          ToPort: 10250
+          CidrIp: !Ref VpcCidr
+          Description: 'Kubelet API'
+        - IpProtocol: tcp
+          FromPort: 10251
+          ToPort: 10252
+          CidrIp: !Ref VpcCidr
+          Description: 'kube-scheduler and kube-controller-manager'
+        - IpProtocol: tcp
+          FromPort: 30000
+          ToPort: 32767
+          CidrIp: '0.0.0.0/0'
+          Description: 'NodePort Services'
+        - IpProtocol: -1
+          CidrIp: !Ref VpcCidr
+          Description: 'All traffic within VPC'
+      Tags:
+        - Key: Name
+          Value: k8s-security-group
+
+  # IAM Role for EC2 instances
+  K8sNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Tags:
+        - Key: Name
+          Value: k8s-node-role
+
+  K8sNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref K8sNodeRole
+
+  # Master Node
+  MasterNode:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AMIId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref K8sSecurityGroup
+      IamInstanceProfile: !Ref K8sNodeInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update
+          apt-get install -y apt-transport-https ca-certificates curl gpg
+          
+          # Disable swap
+          swapoff -a
+          sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+          
+          # Install containerd
+          apt-get update
+          apt-get install -y containerd
+          mkdir -p /etc/containerd
+          containerd config default | tee /etc/containerd/config.toml
+          sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+          systemctl restart containerd
+          systemctl enable containerd
+          
+          # Load kernel modules
+          cat <<EOF | tee /etc/modules-load.d/k8s.conf
+          overlay
+          br_netfilter
+          EOF
+          modprobe overlay
+          modprobe br_netfilter
+          
+          # Configure sysctl
+          cat <<EOF | tee /etc/sysctl.d/k8s.conf
+          net.bridge.bridge-nf-call-iptables  = 1
+          net.bridge.bridge-nf-call-ip6tables = 1
+          net.ipv4.ip_forward                 = 1
+          EOF
+          sysctl --system
+          
+          # Add Kubernetes repository
+          curl -fsSL https://pkgs.k8s.io/core:/stable:/v${KubernetesVersion}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+          echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${KubernetesVersion}/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
+          
+          # Install Kubernetes
+          apt-get update
+          apt-get install -y kubelet kubeadm kubectl
+          apt-mark hold kubelet kubeadm kubectl
+          systemctl enable kubelet
+          
+          # Initialize cluster
+          kubeadm init --pod-network-cidr=${PodNetworkCidr} --apiserver-advertise-address=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
+          
+          # Configure kubectl for ubuntu user
+          mkdir -p /home/ubuntu/.kube
+          cp -i /etc/kubernetes/admin.conf /home/ubuntu/.kube/config
+          chown ubuntu:ubuntu /home/ubuntu/.kube/config
+          
+          # Install CNI plugin
+          sudo -u ubuntu kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
+          
+          # Save join command
+          kubeadm token create --print-join-command > /tmp/kubeadm-join-command
+          chmod 644 /tmp/kubeadm-join-command
+          
+          # Install Helm
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          chmod 700 get_helm.sh
+          ./get_helm.sh
+          
+          # Install KEDA using Helm
+          sudo -u ubuntu helm repo add kedacore https://kedacore.github.io/charts
+          sudo -u ubuntu helm repo update
+          sudo -u ubuntu helm install keda kedacore/keda --namespace keda --create-namespace
+          
+          # Install metrics-server for KEDA scaling
+          sudo -u ubuntu kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+          sleep 30
+          sudo -u ubuntu kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]'
+          
+          # Setup SSH keys
+          mkdir -p /home/ubuntu/.ssh
+          echo "${ClusterPublicKey}" >> /home/ubuntu/.ssh/authorized_keys
+          echo "${ClusterPrivateKey}" | base64 -d > /home/ubuntu/.ssh/id_rsa
+          chmod 600 /home/ubuntu/.ssh/id_rsa
+          chmod 644 /home/ubuntu/.ssh/authorized_keys
+          chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+          
+          cat <<'SSHEOF' >> /home/ubuntu/.ssh/config
+          Host *
+              StrictHostKeyChecking no
+              UserKnownHostsFile=/dev/null
+          SSHEOF
+          chmod 600 /home/ubuntu/.ssh/config
+          chown ubuntu:ubuntu /home/ubuntu/.ssh/config
+      Tags:
+        - Key: Name
+          Value: k8s-master
+        - Key: Role
+          Value: master
+
+  # Worker Nodes (using loop to avoid duplication)
+  'Fn::ForEach::WorkerNodes':
+    - Index
+    - ['1', '2']
+    - 'WorkerNode${Index}':
+        Type: AWS::EC2::Instance
+        DependsOn: MasterNode
+        Properties:
+          ImageId: !Ref AMIId
+          InstanceType: !Ref InstanceType
+          KeyName: !Ref KeyPairName
+          SubnetId: !Ref PublicSubnet
+          SecurityGroupIds:
+            - !Ref K8sSecurityGroup
+          IamInstanceProfile: !Ref K8sNodeInstanceProfile
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash
+              apt-get update
+              apt-get install -y apt-transport-https ca-certificates curl gpg
+              
+              # Disable swap
+              swapoff -a
+              sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+              
+              # Install containerd
+              apt-get update
+              apt-get install -y containerd
+              mkdir -p /etc/containerd
+              containerd config default | tee /etc/containerd/config.toml
+              sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+              systemctl restart containerd
+              systemctl enable containerd
+              
+              # Load kernel modules
+              cat <<EOF | tee /etc/modules-load.d/k8s.conf
+              overlay
+              br_netfilter
+              EOF
+              modprobe overlay
+              modprobe br_netfilter
+              
+              # Configure sysctl
+              cat <<EOF | tee /etc/sysctl.d/k8s.conf
+              net.bridge.bridge-nf-call-iptables  = 1
+              net.bridge.bridge-nf-call-ip6tables = 1
+              net.ipv4.ip_forward                 = 1
+              EOF
+              sysctl --system
+              
+              # Add Kubernetes repository
+              curl -fsSL https://pkgs.k8s.io/core:/stable:/v${KubernetesVersion}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+              echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${KubernetesVersion}/deb/ /' | tee /etc/apt/sources.list.d/kubernetes.list
+              
+              # Install Kubernetes
+              apt-get update
+              apt-get install -y kubelet kubeadm kubectl
+              apt-mark hold kubelet kubeadm kubectl
+              systemctl enable kubelet
+              
+              # Setup SSH keys
+              mkdir -p /home/ubuntu/.ssh
+              echo "${ClusterPublicKey}" >> /home/ubuntu/.ssh/authorized_keys
+              echo "${ClusterPrivateKey}" | base64 -d > /home/ubuntu/.ssh/id_rsa
+              chmod 600 /home/ubuntu/.ssh/id_rsa
+              chmod 644 /home/ubuntu/.ssh/authorized_keys
+              chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+              
+              cat <<'SSHEOF' >> /home/ubuntu/.ssh/config
+              Host *
+                  StrictHostKeyChecking no
+                  UserKnownHostsFile=/dev/null
+              SSHEOF
+              chmod 600 /home/ubuntu/.ssh/config
+              chown ubuntu:ubuntu /home/ubuntu/.ssh/config
+              
+              # Wait and join cluster
+              sleep 300
+              MASTER_IP=${MasterNode.PrivateIp}
+              JOIN_COMMAND=$(ssh -i /home/ubuntu/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@$MASTER_IP 'cat /tmp/kubeadm-join-command')
+              # echo "$JOIN_COMMAND"
+              sudo bash -c "$JOIN_COMMAND"
+          Tags:
+            - Key: Name
+              Value: !Sub 'k8s-worker-${Index}'
+            - Key: Role
+              Value: worker
+
+Outputs:
+  VPCId:
+    Description: 'VPC ID'
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-ID'
+
+  PublicSubnetId:
+    Description: 'Public Subnet ID'
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicSubnet-ID'
+
+  SecurityGroupId:
+    Description: 'Security Group ID'
+    Value: !Ref K8sSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityGroup-ID'
+
+  MasterNodeId:
+    Description: 'Master Node Instance ID'
+    Value: !Ref MasterNode
+    Export:
+      Name: !Sub '${AWS::StackName}-Master-ID'
+
+  MasterNodePublicIP:
+    Description: 'Master Node Public IP'
+    Value: !GetAtt MasterNode.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-Master-PublicIP'
+
+  MasterNodePrivateIP:
+    Description: 'Master Node Private IP'
+    Value: !GetAtt MasterNode.PrivateIp
+    Export:
+      Name: !Sub '${AWS::StackName}-Master-PrivateIP'
+
+  WorkerNode1Id:
+    Description: 'Worker Node 1 Instance ID'
+    Value: !Ref WorkerNode1
+    Export:
+      Name: !Sub '${AWS::StackName}-Worker1-ID'
+
+  WorkerNode1PublicIP:
+    Description: 'Worker Node 1 Public IP'
+    Value: !GetAtt WorkerNode1.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-Worker1-PublicIP'
+
+  WorkerNode2Id:
+    Description: 'Worker Node 2 Instance ID'
+    Value: !Ref WorkerNode2
+    Export:
+      Name: !Sub '${AWS::StackName}-Worker2-ID'
+
+  WorkerNode2PublicIP:
+    Description: 'Worker Node 2 Public IP'
+    Value: !GetAtt WorkerNode2.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-Worker2-PublicIP'
+
+  KubernetesAPIEndpoint:
+    Description: 'Kubernetes API Server Endpoint'
+    Value: !Sub 'https://${MasterNode.PublicIp}:6443'
+    Export:
+      Name: !Sub '${AWS::StackName}-K8s-API-Endpoint'
+
+  SSHCommand:
+    Description: 'SSH command to connect to master node'
+    Value: !Sub 'ssh -i ${KeyPairName}.pem ubuntu@${MasterNode.PublicIp}'
+    Export:
+      Name: !Sub '${AWS::StackName}-SSH-Command'

@@ -1,0 +1,84 @@
+aws cloudformation create-stack \
+  --stack-name k8s-cluster \
+  --template-body file://kubernetes-cluster.yaml \
+  --parameters ParameterKey=KeyPairName,ParameterValue=your-key-pair \
+  --capabilities CAPABILITY_IAM
+
+
+
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+chmod 700 get_helm.sh
+./get_helm.sh
+
+helm version
+
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo update
+helm install keda kedacore/keda --namespace keda --create-namespace
+kubectl get pods -n keda
+
+
+sudo tail  /var/log/cloud-init-output.log
+cloud-init status --long
+sudo cat /var/log/cloud-init-output.log | grep -A 10 -B 10 "error\|failed\|ERROR"
+    6  which kubeadm kubelet kubectl
+    7  dpkg -l | grep kube
+
+
+sudo cat /var/log/cloud-init-output.log | grep -A 5 -B 5 "kubeadm join"
+
+
+ssh -o StrictHostKeyChecking=no ubuntu@10.0.1.132 'cat /tmp/kubeadm-join-command'
+
+Used links - 
+https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
+https://helm.sh/docs/intro/install/
+https://keda.sh/docs/2.12/deploy/#helm
+
+
+
+
+To execute cubectl commands from local - 
+scp -i "ssh-keys/k8s-ssh-keypair" ubuntu@ec2-3-236-37-253.compute-1.amazonaws.com:~/.kube/config ~/.kube/config
+
+kubectl cluster-info
+kubectl apply -f app-stack.yaml
+kubectl get all
+
+curl http://:32128
+
+
+=> CMD's to deployb and manage kubectl from local:-
+-------------------------------------------------
+# Deploy apps
+./deploy-to-master.sh deploy ec2-3-236-37-253.compute-1.amazonaws.com
+
+# Check status
+./deploy-to-master.sh status ec2-3-236-37-253.compute-1.amazonaws.com
+
+# Delete apps
+./deploy-to-master.sh delete ec2-3-236-37-253.compute-1.amazonaws.com
+
+# Run any kubectl command
+./deploy-to-master.sh kubectl ec2-3-236-37-253.compute-1.amazonaws.com "get pods"
+./deploy-to-master.sh kubectl ec2-3-236-37-253.compute-1.amazonaws.com "describe pod mysql-db"
+
+./deploy-to-master.sh kubectl 3.227.245.141 "get nodes"
+
+
+
+Testing - 
+# Deploy with low scaling thresholds
+./deploy-to-master.sh deploy <hostname>
+
+# Test nginx scaling (CPU: 3%, Memory: 5%)
+./deploy-to-master.sh test-nginx 3.227.245.141
+
+# Test MySQL scaling (CPU: 5%, Memory: 10%)
+./deploy-to-master.sh test-mysql 3.227.245.141
+
+# Watch scaling in real-time
+./deploy-to-master.sh watch 3.227.245.141
+
+
+

@@ -1,0 +1,188 @@
+# MySQL Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: default
+type: Opaque
+data:
+  mysql-root-password: cm9vdHBhc3N3b3Jk
+  mysql-password: dXNlcnBhc3N3b3Jk
+---
+# MySQL PV
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mysql-pv
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+  - ReadWriteOnce
+  hostPath:
+    path: /tmp/mysql-data
+  persistentVolumeReclaimPolicy: Retain
+---
+# MySQL PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-pvc
+  namespace: default
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: ""
+---
+# MySQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-db
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql-db
+  template:
+    metadata:
+      labels:
+        app: mysql-db
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        ports:
+        - containerPort: 3306
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: MYSQL_DATABASE
+          value: "testdb"
+        - name: MYSQL_USER
+          value: "testuser"
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-password
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: mysql-storage
+          mountPath: /var/lib/mysql
+      volumes:
+      - name: mysql-storage
+        persistentVolumeClaim:
+          claimName: mysql-pvc
+---
+# MySQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-db-service
+  namespace: default
+spec:
+  selector:
+    app: mysql-db
+  ports:
+  - port: 3306
+    targetPort: 3306
+  type: ClusterIP
+---
+# Nginx Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-web
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-web
+  template:
+    metadata:
+      labels:
+        app: nginx-web
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+---
+# Nginx Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-web-service
+  namespace: default
+spec:
+  selector:
+    app: nginx-web
+  ports:
+  - port: 80
+    targetPort: 80
+  type: LoadBalancer
+---
+# MySQL KEDA Scaler
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mysql-db-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: mysql-db
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  triggers:
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "5"
+  - type: memory
+    metadata:
+      type: Utilization
+      value: "10"
+---
+# Nginx KEDA Scaler
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: nginx-web-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: nginx-web
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "3"
+  - type: memory
+    metadata:
+      type: Utilization
+      value: "5"
